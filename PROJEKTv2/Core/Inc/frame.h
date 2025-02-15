@@ -3,23 +3,28 @@
 
 #include "main.h"
 
+
+// * Struktury *
 typedef struct {
-    uint8_t sender;                    	   // Adres nadawcy
-    uint8_t receiver;                	   // Adres odbiorcy
-    uint8_t function;               	   // komenda do wykonania przez mikroprocesor
-    uint16_t argument;    				   // Argument komendy
-    uint16_t checksum;                     // Suma kontrolna
+    uint8_t sender;             // Adres nadawcy (1 bajt)
+    uint8_t receiver;           // Adres odbiorcy (1 bajt)
+    uint8_t function;           // Kod komendy (1 bajt)
+    uint32_t argument;          // Argument komendy (4 bajty, 32-bit)
+    uint16_t archive_index;     // Indeks archiwalnego odczytu (2 bajty)
+    uint16_t checksum;          // Suma kontrolna (2 bajty)
 } Frame_structure;
 
 typedef struct {
-    uint8_t sender[2];                    	   // Adres nadawcy
-    uint8_t receiver[2];                	   // Adres odbiorcy
-    uint8_t function[2];                 	   // komenda do wykonania przez mikroprocesor
-    uint8_t argument[8];    				   // Argument komendy
-    uint8_t checksum[4];                       // Suma kontrolna
+    uint8_t sender[2];          // 2 znaki heksadecymalne
+    uint8_t receiver[2];        // 2 znaki heksadecymalne
+    uint8_t function[2];        // 2 znaki heksadecymalne
+    uint8_t argument[8];        // 8 znaków heksadecymalnych (dla 32-bitowej wartości)
+    uint8_t archive_index[4];   // 4 znaki heksadecymalne (dla 16-bitowej wartości)
+    uint8_t checksum[4];        // 4 znaki heksadecymalne (dla 16-bitowej wartości)
 } Frame_raw_structure;
 
-void ReceiveFrame();
+// * Prototypy *
+void ReceiveFrame(void);
 
 
 /* Pozostałości po pracy z biblioteką oryginalną od producenta czujnika

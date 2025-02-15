@@ -59,7 +59,7 @@ void I2C1_EV_IRQHandler(void);
 void I2C1_ER_IRQHandler(void);
 void USART2_IRQHandler(void);
 /* USER CODE BEGIN EFP */
-
+extern uint32_t ST_Ticks;
 /* USER CODE END EFP */
 
 #ifdef __cplusplus

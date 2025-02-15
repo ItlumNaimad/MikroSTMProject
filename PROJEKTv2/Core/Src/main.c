@@ -70,6 +70,7 @@ volatile uint16_t frame_lenght;
 
 volatile uint8_t frame[USART_RXBUF_LEN];
 
+volatile uint32_t ST_Ticks;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/

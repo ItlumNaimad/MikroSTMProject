@@ -31,7 +31,7 @@ uint16_t hexStringToWord(const uint8_t *hex) {
 	uint8_t byte1 = hexDigitToByte(hex[1]);
 	uint8_t byte2 = hexDigitToByte(hex[2]);
 	uint8_t byte3 = hexDigitToByte(hex[3]);
-	uint8_t sumOfBytes = byte3 + (byte2 * 0x10) + (byte1 * 0x100) + (byte0 * 0x1000);
+	uint16_t sumOfBytes = byte3 + (byte2 * 0x10) + (byte1 * 0x100) + (byte0 * 0x1000);
 	return sumOfBytes;
 }
 
