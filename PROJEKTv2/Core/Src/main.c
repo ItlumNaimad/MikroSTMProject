@@ -33,7 +33,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define USART_TXBUF_LEN 220
+#define USART_RXBUF_LEN 20
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -47,8 +48,7 @@ I2C_HandleTypeDef hi2c1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-#define USART_TXBUF_LEN 220
-#define USART_RXBUF_LEN 20
+
 
 // Bufor nadawczy
 uint8_t USART_TxBuf[USART_TXBUF_LEN];
@@ -70,7 +70,11 @@ volatile uint16_t frame_lenght;
 
 volatile uint8_t frame[USART_RXBUF_LEN];
 
+// Zmienna inkrementowana w SysTicku
 volatile uint32_t ST_Ticks;
+
+// Globalny uchwyt czujnika BME280
+BME280_HandleTypeDef bme_handle;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -235,8 +239,11 @@ int main(void)
   MX_USART2_UART_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
+  // Inicjalizacja odbierania danych przez UART
   HAL_UART_Receive_IT(&huart2, &USART_RxBuf[0], 1);  // Inicjalizacja odbierania danych przez interfejs UART
 
+  // Inicjalizacja czujnika BME280
+   BME280_Init(&bme_handle, &hi2c1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -244,6 +251,7 @@ int main(void)
   while (1)
   {
 	  ReceiveFrame();
+	  BME280_Task(&bme_handle);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
