@@ -1,6 +1,6 @@
 #include "main.h"
 #include "frame.h"
-#include "crc16ibm.h"
+#include "crc16ibm.h"  // Używamy funkcji hexDigitToByte, hexStringToByte, hexStringToWord z tego modułu
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -8,51 +8,49 @@
 #define FRAME_START '^' // ASCII 94
 #define FRAME_END   '#' // ASCII 35
 
-/* Rozmiary pól w wersji raw (jako ciągi hex) */
+/* Definicje długości poszczególnych pól (surowe, jako ciągi hex) */
 #define LEN_SENDER        2
 #define LEN_RECEIVER      2
 #define LEN_DATALENGTH    2  // 1 bajt = 2 znaki hex
 #define LEN_CHECKSUM      4  // 2 bajty = 4 znaki hex
 
-/* Stan odbioru poszczególnych pól */
+/* Stan maszyny odbioru */
 typedef enum {
     FRAME_WAIT_START,
     FRAME_READ_SENDER,
     FRAME_READ_RECEIVER,
     FRAME_READ_DATALENGTH,
-    FRAME_READ_PAYLOAD,    // Odczyt payloadu – długość zależna od data_length
+    FRAME_READ_PAYLOAD,    // odczytujemy payload – długość = data_length * 2 znaki
     FRAME_READ_CHECKSUM,
+    FRAME_READ_END,        // Oczekujemy znaku FRAME_END
     FRAME_COMPLETE
 } FrameState;
 
-/* Globalne zmienne dla odbioru ramki */
+/* Globalne zmienne */
 static FrameState current_state = FRAME_WAIT_START;
-static uint8_t field_index = 0;  // Licznik odebranych znaków dla bieżącego pola
-static uint16_t expected_payload_hex_length = 0; // liczba znaków, którą trzeba odebrać dla payloadu (data_length * 2)
+static uint16_t field_index = 0;  // licznik znaków w bieżącym polu
+static uint16_t expected_payload_hex_length = 0; // (data_length bajtów * 2 znaków)
 static Frame_raw_structure raw_frame;   // Bufor surowej ramki
-static Frame_structure parsed_frame;    // Struktura z przekonwertowanymi wartościami
+static Frame_structure parsed_frame;    // Przetworzona ramka
+
 extern UART_HandleTypeDef huart2;
 
-/* Funkcja konwersji 8 znaków hex na 32-bitową wartość */
+/* Funkcja konwersji ciągu hex (o podanej długości) na 32-bitową wartość */
 static uint32_t hexStringToDword(uint8_t *str, uint8_t len) {
     uint32_t value = 0;
-    for (uint8_t i = 0; i < len; i++) {
+    for(uint8_t i = 0; i < len; i++){
         uint8_t nibble = hexDigitToByte(str[i]);
-        if (nibble == 0xFF)
-            return 0; // lub można obsłużyć błąd
+        if(nibble == 0xFF)
+            return 0; // lub obsłużyć błąd
         value = (value << 4) | nibble;
     }
     return value;
 }
 
-/*
- * Funkcja przetwarzająca odebrane pole – oprócz konwersji,
- * kopiujemy dane do raw_frame z tymczasowego buffora.
- * Tutaj również wywołujemy funkcję hexStringToByte z pliku crc16ibm.c
- * Zwrócone wartości przekazujemy do sturktury parsed_frame, która jest
- * od przetworzonej ramki.
- * */
-static void processReceivedField(FrameState state, uint8_t *buffer, uint8_t len) {
+/* Funkcja przetwarzająca odebrane pole.
+ * W zależności od bieżącego stanu konwertujemy dane z formatu hex do wartości binarnych.
+ */
+static void processReceivedField(FrameState state, uint8_t *buffer, uint16_t len) {
     switch(state) {
         case FRAME_READ_SENDER:
             memcpy(raw_frame.sender, buffer, LEN_SENDER);
@@ -66,21 +64,20 @@ static void processReceivedField(FrameState state, uint8_t *buffer, uint8_t len)
             memcpy(raw_frame.data_length, buffer, LEN_DATALENGTH);
             uint8_t dl = hexStringToByte(buffer);
             parsed_frame.data_length = dl;
-            expected_payload_hex_length = dl * 2; // Każdy bajt = 2 znaki hex
+            expected_payload_hex_length = dl * 2;  // Każdy bajt to 2 znaki
             break;
         }
         case FRAME_READ_PAYLOAD:
             memcpy(raw_frame.payload, buffer, expected_payload_hex_length);
-            /* Konwersja payloadu – tutaj rozbijamy na poszczególne bajty.
-             * Aplikacja interpretująca komendę powinna wykorzystać parsed_frame.payload,
-             * która to jest tablicą bajtów uzyskaną z każdej pary znaków.
-             * Przykładowo: pierwszy bajt to kod komendy, kolejne 4 bajty to argument,
-             * następne 3 bajty to indeks archiwalny.
-             * Jeśli payload jest krótszy, aplikacja musi to rozpoznać po data_length.
-            */
-            for (uint8_t i = 0; i < parsed_frame.data_length; i++) {
-                uint8_t pos = i * 2;
-                parsed_frame.payload[i] = hexStringToByte(&buffer[pos]);
+            /* Kopiujemy payload do parsed_frame.payload.
+             * Interpretacja payloadu: zawsze pierwszy bajt to kod komendy.
+             * Jeśli parsed_frame.data_length > 10, oznacza to, że oprócz 1 bajtu kodu i 8 bajtów argumentu,
+             * pojawia się dodatkowo pole archiwum (np. 3 bajty, lub więcej).
+             * W tej implementacji przekazujemy całość, a dalsza interpretacja pozostaje w gestii aplikacji.
+             */
+            for(uint16_t i = 0; i < (expected_payload_hex_length / 2); i++){
+                // Przetwarzamy pary znaków, by uzyskać pojedynczy bajt payloadu
+                parsed_frame.payload[i] = hexStringToByte(&buffer[i*2]);
             }
             break;
         case FRAME_READ_CHECKSUM:
@@ -92,71 +89,53 @@ static void processReceivedField(FrameState state, uint8_t *buffer, uint8_t len)
     }
 }
 
-/* Funkcja sprawdzająca sumę kontrolną ramki.
- * Obliczamy CRC16 IBM (z funkcji calculateCRC) na podstawie danych:
- * sender, receiver, data_length oraz payload (czyli wszystkie pola przed checksumem).
- * Następnie porównujemy z wartością odebraną w checksum.
-*/
-static uint8_t isFrameChecksumValid(void) {
-    /* Obliczamy łączną długość danych w bajtach, które będziemy przeliczać z wersji raw:
-     * LEN_SENDER + LEN_RECEIVER + LEN_DATALENGTH + (data_length bajtów) – pamiętaj, że w wersji raw każdy bajt to 2 znaki.
-     */
-    uint16_t raw_length = LEN_SENDER + LEN_RECEIVER + LEN_DATALENGTH + expected_payload_hex_length;
-    uint8_t binary_buffer[raw_length / 2];  // Każde 2 znaki = 1 bajt
-    uint8_t index = 0;
-
-    binary_buffer[index++] = hexStringToByte(raw_frame.sender);
-    binary_buffer[index++] = hexStringToByte(raw_frame.receiver);
-    binary_buffer[index++] = hexStringToByte(raw_frame.data_length);
-    for (uint8_t i = 0; i < expected_payload_hex_length; i += 2) {
-        binary_buffer[index++] = hexStringToByte(&raw_frame.payload[i]);
+/* Funkcja obliczająca sumę kontrolną na podstawie pól ramki (od sender do końca payloadu).
+ * Tutaj stosujemy prosty algorytm – sumujemy wartości bajtów.
+ */
+static uint16_t calculateParsedChecksum(Frame_structure *frame) {
+    uint16_t sum = 0;
+    sum += frame->sender;
+    sum += frame->receiver;
+    sum += frame->data_length;
+    for(uint8_t i = 0; i < frame->data_length; i++){
+        sum += frame->payload[i];
     }
-    uint16_t calculated_crc = calculateCRC(binary_buffer, index);
-    uint16_t received_crc = hexStringToWord(raw_frame.checksum);
-    return (calculated_crc == received_crc);
+    return sum;
 }
 
-/* Funkcja odbioru ramki – przetwarzanie bajt po bajcie.
- *  Używamy funkcji UART_RXisNotEmpty() zamiast UART_isNotEmpty() zgodnie z wymaganiami.
- */
+static uint8_t isParsedChecksumValid(Frame_structure *frame) {
+    return (calculateParsedChecksum(frame) == frame->checksum);
+}
+
+/* Funkcja odbioru ramki – przetwarzanie bajt po bajcie */
 void ReceiveFrame(void) {
     uint8_t RX_byte;
-    while (UART_RXisNotEmpty()) {
+    while(UART_RXisNotEmpty()) {  // Zakładamy, że funkcja UART_RXisNotEmpty() sprawdza, czy są dane
         RX_byte = USART_getchar();
 
-        /* Jeśli otrzymamy znak startu, resetujemy stan odbioru */
-        if (RX_byte == FRAME_START) {
+        /* Jeśli otrzymamy znak startu, resetujemy stan */
+        if(RX_byte == FRAME_START) {
             current_state = FRAME_READ_SENDER;
             field_index = 0;
             expected_payload_hex_length = 0;
-            /*
-             * memset jest tutaj użyte do wyzerowania całej struktury ramki.
-             * Jest to inicjalizacja struktury. Użyta tylko przy odbiorze znaku początku ramki
-             */
             memset(&raw_frame, 0, sizeof(raw_frame));
             continue;
         }
 
-        if (current_state == FRAME_WAIT_START)
+        if(current_state == FRAME_WAIT_START)
             continue;
 
-        /* Jeśli RX_byte to FRAME_END pojawi się nie tam, gdzie powinno, resetujemy odbiór.
-           Jeżeli jednak ramka jest poprawnie skonstruowana, odebranie FRAME_END nie nastąpi, bo
-           odbieramy dokładnie określoną liczbę znaków zgodnie z data_length.
-        */
-        if (RX_byte == FRAME_END) {
-            /* Można opcjonalnie dodać logikę rozpoznania, czy znak ten pojawił się przedwcześnie.
-               W tej implementacji zakładamy, że FRAME_END pojawia się tylko poza odbiorem.
-            */
+        /* Jeśli pojawi się znak FRAME_END przedwcześnie, resetujemy odbiór */
+        if(RX_byte == FRAME_END && current_state != FRAME_READ_END) {
             current_state = FRAME_WAIT_START;
             continue;
         }
 
-        switch (current_state) {
+        switch(current_state) {
             case FRAME_READ_SENDER: {
                 static uint8_t temp_buf[LEN_SENDER];
                 temp_buf[field_index++] = RX_byte;
-                if (field_index >= LEN_SENDER) {
+                if(field_index >= LEN_SENDER) {
                     processReceivedField(FRAME_READ_SENDER, temp_buf, LEN_SENDER);
                     field_index = 0;
                     current_state = FRAME_READ_RECEIVER;
@@ -166,7 +145,7 @@ void ReceiveFrame(void) {
             case FRAME_READ_RECEIVER: {
                 static uint8_t temp_buf[LEN_RECEIVER];
                 temp_buf[field_index++] = RX_byte;
-                if (field_index >= LEN_RECEIVER) {
+                if(field_index >= LEN_RECEIVER) {
                     processReceivedField(FRAME_READ_RECEIVER, temp_buf, LEN_RECEIVER);
                     field_index = 0;
                     current_state = FRAME_READ_DATALENGTH;
@@ -176,7 +155,7 @@ void ReceiveFrame(void) {
             case FRAME_READ_DATALENGTH: {
                 static uint8_t temp_buf[LEN_DATALENGTH];
                 temp_buf[field_index++] = RX_byte;
-                if (field_index >= LEN_DATALENGTH) {
+                if(field_index >= LEN_DATALENGTH) {
                     processReceivedField(FRAME_READ_DATALENGTH, temp_buf, LEN_DATALENGTH);
                     field_index = 0;
                     current_state = FRAME_READ_PAYLOAD;
@@ -184,9 +163,9 @@ void ReceiveFrame(void) {
                 break;
             }
             case FRAME_READ_PAYLOAD: {
-                static uint8_t temp_buf[MAX_PAYLOAD_HEX];
+                static uint8_t temp_buf[28]; // maksymalna liczba znaków payload
                 temp_buf[field_index++] = RX_byte;
-                if (field_index >= expected_payload_hex_length) {
+                if(field_index >= expected_payload_hex_length) {
                     processReceivedField(FRAME_READ_PAYLOAD, temp_buf, expected_payload_hex_length);
                     field_index = 0;
                     current_state = FRAME_READ_CHECKSUM;
@@ -196,47 +175,51 @@ void ReceiveFrame(void) {
             case FRAME_READ_CHECKSUM: {
                 static uint8_t temp_buf[LEN_CHECKSUM];
                 temp_buf[field_index++] = RX_byte;
-                if (field_index >= LEN_CHECKSUM) {
+                if(field_index >= LEN_CHECKSUM) {
                     processReceivedField(FRAME_READ_CHECKSUM, temp_buf, LEN_CHECKSUM);
                     field_index = 0;
+                    current_state = FRAME_READ_END;
+                }
+                break;
+            }
+            case FRAME_READ_END: {
+                /* Oczekujemy, aż otrzymamy znak FRAME_END */
+                if(RX_byte == FRAME_END) {
                     current_state = FRAME_COMPLETE;
+                } else {
+                    current_state = FRAME_WAIT_START;
                 }
                 break;
             }
             default:
                 break;
         }
-        // STAN ZROBIONY DLA DEBUGOWANIA - ODPOWIEDZI BĘDĄ W FORMIE RAMEK
-        if (current_state == FRAME_COMPLETE) {
-            if (isFrameChecksumValid()) {
-                /* Po walidacji możemy przekazać odebrane dane do aplikacji.
-                   Payload interpretuje się według ustalonego formatu – np. pierwszy bajt to kod komendy.
+
+        if(current_state == FRAME_COMPLETE) {
+            if(isParsedChecksumValid(&parsed_frame)) {
+                /* Tutaj interpretujemy odebrany payload.
+                   Jeśli parsed_frame.data_length <= 10 – payload zawiera tylko komendę i argument.
+                   Jeśli > 10 – payload zawiera dodatkowo pole archiwum (od bajtu 10 wzwyż).
                 */
-                uint8_t command = parsed_frame.payload[0];
-                // Przykładowa interpretacja: komenda 16, 17, 18 oznacza odczyt temperatury, wilgotności lub ciśnienia
-                // oraz dodatkowo w payload może być argument (dla ustawienia interwału) lub odczyt archiwalny.
                 char response[64];
-                sprintf(response, "Cmd: %02X DL: %02X Payload:", command, parsed_frame.data_length);
-                while(!UART_TXisNotEmpty()); // czekamy, aż bufor TX będzie gotowy
+                sprintf(response, "Cmd: %02X DL: %02X Payload:", parsed_frame.payload[0], parsed_frame.data_length);
                 HAL_UART_Transmit_IT(&huart2, (uint8_t *)response, strlen(response));
                 memset(response, 0, sizeof(response));
-                for (uint8_t i = 0; i < parsed_frame.data_length; i++) {
+                for(uint8_t i = 0; i < parsed_frame.data_length; i++){
                     sprintf(response, " %02X", parsed_frame.payload[i]);
-                    while(!UART_TXisNotEmpty());
                     HAL_UART_Transmit_IT(&huart2, (uint8_t *)response, strlen(response));
                     memset(response, 0, sizeof(response));
                 }
                 sprintf(response, " CRC: %04X\r\n", parsed_frame.checksum);
-                while(!UART_TXisNotEmpty());
                 HAL_UART_Transmit_IT(&huart2, (uint8_t *)response, strlen(response));
             } else {
-                while(!UART_TXisNotEmpty());
                 HAL_UART_Transmit_IT(&huart2, (uint8_t *)"Checksum error\r\n", 17);
             }
             current_state = FRAME_WAIT_START;
         }
     }
 }
+
 
 
 /*

@@ -58,7 +58,7 @@
 extern I2C_HandleTypeDef hi2c1;
 extern UART_HandleTypeDef huart2;
 /* USER CODE BEGIN EV */
-
+volatile uint32_t ST_Ticks = 0;
 /* USER CODE END EV */
 
 /******************************************************************************/

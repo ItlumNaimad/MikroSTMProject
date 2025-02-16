@@ -70,11 +70,6 @@ volatile uint16_t frame_lenght;
 
 volatile uint8_t frame[USART_RXBUF_LEN];
 
-// Zmienna inkrementowana w SysTicku
-volatile uint32_t ST_Ticks;
-
-// Globalny uchwyt czujnika BME280
-BME280_HandleTypeDef bme_handle;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -133,7 +128,7 @@ uint8_t USART_getline(char *buf){
 	static uint8_t index=0;
 	int i;
 	uint8_t line_length;
-	while(UART_isNotEmpty()){
+	while(UART_RXisNotEmpty()){
 		bf[index]=USART_getchar();
 		//USART_fsend("[%02X]", bf[idx]);
 		if(((bf[index]==10)||(bf[index]==13))){

@@ -4,6 +4,7 @@
 // Globalny uchwyt – przykładowo
 BME280_HandleTypeDef bme_handle;
 
+
 // Zewnętrzne zmienne
 uint32_t read_interval = 1000; // interwał w ms
 
@@ -12,15 +13,49 @@ uint32_t read_interval = 1000; // interwał w ms
  * Ustawia uchwyt I2C, stan początkowy, pobiera ST_Ticks z SysTick oraz flagę konfiguracji.
  */
 void BME280_Init(BME280_HandleTypeDef* bme, I2C_HandleTypeDef* hi2c) {
+    uint8_t calib_temp[26]; // dane kalibracyjne dla temperatury i ciśnienia (0x88 do 0xA1)
+    uint8_t calib_hum[7];   // dane kalibracyjne dla wilgotności (0xE1 do 0xE7)
+
     bme->hi2c = hi2c;
     bme->state = BME280_STATE_IDLE;
     bme->last_measurement_tick = ST_Ticks;  // Używamy zmiennej ST_Ticks
     bme->configured = 0;
 
-    // Tutaj należy odczytać dane kalibracyjne z czujnika (np. przez HAL_I2C_Mem_Read_IT)
-    // i zapisać je w bme->calib_data. W tej implementacji zakładamy, że to wykonano.
-}
+    // Odczyt danych kalibracyjnych z rejestrów czujnika
+    if(HAL_I2C_Mem_Read(bme->hi2c, BME280_ADDR, BME280_REG_TEMP_PRESS_CALIB_DATA, I2C_MEMADD_SIZE_8BIT,
+                        calib_temp, 26, HAL_MAX_DELAY) != HAL_OK) {
+        // Obsługa błędu – możesz wywołać Error_Handler() lub ustawić status błędu
+    }
 
+    if(HAL_I2C_Mem_Read(bme->hi2c, BME280_ADDR, BME280_REG_HUMIDITY_CALIB_DATA, I2C_MEMADD_SIZE_8BIT,
+                        calib_hum, 7, HAL_MAX_DELAY) != HAL_OK) {
+        // Obsługa błędu
+    }
+
+    // Wypełnienie danych kalibracyjnych dla temperatury i ciśnienia
+    bme->calib_data.dig_t1 = (uint16_t)(calib_temp[0] | (calib_temp[1] << 8));
+    bme->calib_data.dig_t2 = (int16_t)(calib_temp[2] | (calib_temp[3] << 8));
+    bme->calib_data.dig_t3 = (int16_t)(calib_temp[4] | (calib_temp[5] << 8));
+    bme->calib_data.dig_p1 = (uint16_t)(calib_temp[6] | (calib_temp[7] << 8));
+    bme->calib_data.dig_p2 = (int16_t)(calib_temp[8] | (calib_temp[9] << 8));
+    bme->calib_data.dig_p3 = (int16_t)(calib_temp[10] | (calib_temp[11] << 8));
+    bme->calib_data.dig_p4 = (int16_t)(calib_temp[12] | (calib_temp[13] << 8));
+    bme->calib_data.dig_p5 = (int16_t)(calib_temp[14] | (calib_temp[15] << 8));
+    bme->calib_data.dig_p6 = (int16_t)(calib_temp[16] | (calib_temp[17] << 8));
+    bme->calib_data.dig_p7 = (int16_t)(calib_temp[18] | (calib_temp[19] << 8));
+    bme->calib_data.dig_p8 = (int16_t)(calib_temp[20] | (calib_temp[21] << 8));
+    bme->calib_data.dig_p9 = (int16_t)(calib_temp[22] | (calib_temp[23] << 8));
+    bme->calib_data.dig_h1 = calib_temp[25]; // ostatni bajt z pierwszego bloku
+
+    // Wypełnienie danych kalibracyjnych dla wilgotności
+    bme->calib_data.dig_h2 = (int16_t)(calib_hum[0] | (calib_hum[1] << 8));
+    bme->calib_data.dig_h3 = calib_hum[2];
+    bme->calib_data.dig_h4 = (int16_t)(((int8_t)calib_hum[3] << 4) | (calib_hum[4] & 0x0F));
+    bme->calib_data.dig_h5 = (int16_t)(((int8_t)calib_hum[5] << 4) | (calib_hum[4] >> 4));
+    bme->calib_data.dig_h6 = (int8_t)calib_hum[6];
+
+    // Uwaga: t_fine będzie obliczane podczas przetwarzania pomiarów
+}
 /**
  * @brief Główna funkcja zadaniowa czujnika BME280.
  * Realizuje cykl pomiarowy: konfiguracja, wyzwolenie pomiaru, oczekiwanie na konwersję,
