@@ -8,6 +8,56 @@ BME280_HandleTypeDef bme_handle;
 // Zewnętrzne zmienne
 uint32_t read_interval = 1000; // interwał w ms
 
+/* Ring buffer przechowujący wyniki pomiarów */
+static BME280_Measurement ring_buffer[BUFFER_SIZE];
+/* Indeks wskazujący miejsce do zapisu nowego wpisu (bufor cykliczny) */
+static uint16_t ring_buffer_index = 0;
+/* Liczba wpisów obecnie zapisanych w buforze */
+static uint16_t ring_buffer_count = 0;
+
+/* Funkcja dodająca nowy pomiar do bufora kołowego */
+void AppendMeasurement(BME280_Measurement meas) {
+    ring_buffer[ring_buffer_index] = meas;
+    ring_buffer_index = (ring_buffer_index + 1) % BUFFER_SIZE;
+    if(ring_buffer_count < BUFFER_SIZE) {
+        ring_buffer_count++;
+    }
+}
+
+/* Funkcja zwracająca najnowszy pomiar */
+void GetLatestMeasurement(BME280_Measurement *meas) {
+    if(ring_buffer_count == 0) return;
+    uint16_t latest = (ring_buffer_index == 0) ? (BUFFER_SIZE - 1) : (ring_buffer_index - 1);
+    *meas = ring_buffer[latest];
+}
+
+/* Funkcja pobierająca pomiar archiwalny.
+   Parametr 'index' oznacza: 0 – najnowszy, 1 – poprzedni itd.
+   Zwraca 0 przy sukcesie, -1 gdy indeks poza zakresem.
+*/
+int GetHistoricalMeasurement(uint16_t index, BME280_Measurement *meas) {
+    if(ring_buffer_count == 0 || index >= ring_buffer_count)
+        return -1; // brak danych lub indeks poza zakresem
+    uint16_t pos = (ring_buffer_index + BUFFER_SIZE - index - 1) % BUFFER_SIZE;
+    *meas = ring_buffer[pos];
+    return 0;
+}
+
+/* Funkcja czyszcząca bufor kołowy */
+void ClearMeasurementBuffer(void) {
+    ring_buffer_count = 0;
+    ring_buffer_index = 0;
+    memset(ring_buffer, 0, sizeof(ring_buffer));
+}
+
+/* Funkcja zwracająca indeks ostatniego zapisanego pomiaru archiwalnego.
+   Zwraca wartość od 0 do (ring_buffer_count - 1). */
+uint32_t GetLastArchiveIndex(void) {
+    if(ring_buffer_count == 0)
+        return 0;
+    return ring_buffer_count - 1;
+}
+
 /**
  * @brief Inicjalizacja czujnika BME280.
  * Ustawia uchwyt I2C, stan początkowy, pobiera ST_Ticks z SysTick oraz flagę konfiguracji.

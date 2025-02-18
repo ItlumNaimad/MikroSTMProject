@@ -6,6 +6,7 @@
  */
 
 #include "crc16ibm.h"
+
 uint8_t hexDigitToByte(uint8_t hex) {
 	switch (hex){
 		case '0' ... '9': return hex - '0';

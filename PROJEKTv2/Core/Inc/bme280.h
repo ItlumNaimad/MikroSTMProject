@@ -5,7 +5,7 @@
 #include "stm32f4xx_hal.h"
 
 
-// Adres BME280 – przyjmujemy, że sensor ma adres 0x77 (Bo po I2C, w przypadku SDI 0x76);
+// Adres BME280 – przyjmujemy, że sensor ma adres 0x76 (Bo to zalęży od łączenia pinu SDO, którego w swoim modelu nie mam);
 // pamiętać o przesunięciu 1 bit w lewo przy użyciu HAL bo potrzebujemy wartości 8 bitowych.
 #define BME280_ADDR (0x77 << 1)
 
@@ -18,6 +18,9 @@
 #define BME280_LEN_TEMP_PRESS_CALIB_DATA 26
 #define BME280_REG_HUMIDITY_CALIB_DATA 0xE1
 #define BME280_LEN_HUMIDITY_CALIB_DATA 7
+
+/* Ustalony rozmiar bufora – co najmniej 750 wpisów */
+#define BUFFER_SIZE 750
 
 extern volatile uint32_t ST_Ticks;
 
@@ -100,7 +103,14 @@ typedef struct {
 } BME280_HandleTypeDef;
 
 
-// Prototypy funkcji
+/* Prototypy funkcji */
+// Bufor kołowy dla zapisów archiwalnych pomiarów:
+void AppendMeasurement(BME280_Measurement meas);
+void GetLatestMeasurement(BME280_Measurement *meas);
+int GetHistoricalMeasurement(uint16_t index, BME280_Measurement *meas);
+void ClearMeasurementBuffer(void);
+uint32_t GetLastArchiveIndex(void);
+
 void BME280_Init(BME280_HandleTypeDef* bme, I2C_HandleTypeDef* hi2c);
 void BME280_Task(BME280_HandleTypeDef* bme);
 void BME280_ProcessData(BME280_HandleTypeDef* bme);

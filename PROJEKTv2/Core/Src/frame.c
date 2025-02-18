@@ -1,6 +1,6 @@
 #include "main.h"
 #include "frame.h"
-#include "crc16ibm.h"  // Używamy funkcji hexDigitToByte, hexStringToByte, hexStringToWord z tego modułu
+#include "crc16ibm.h"  // Używamy funkcji hexDigitToByte, hexStringToByte, hexStringToWord oraz calculateCRC z tego modułu
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -8,7 +8,7 @@
 #define FRAME_START '^' // ASCII 94
 #define FRAME_END   '#' // ASCII 35
 
-/* Definicje długości poszczególnych pól (surowe, jako ciągi hex) */
+/* Definicje długości poszczególnych pól (w surowej postaci – ciągi hex) */
 #define LEN_SENDER        2
 #define LEN_RECEIVER      2
 #define LEN_DATALENGTH    2  // 1 bajt = 2 znaki hex
@@ -20,7 +20,7 @@ typedef enum {
     FRAME_READ_SENDER,
     FRAME_READ_RECEIVER,
     FRAME_READ_DATALENGTH,
-    FRAME_READ_PAYLOAD,    // odczytujemy payload – długość = data_length * 2 znaki
+    FRAME_READ_PAYLOAD,    // Odczytujemy payload – długość = data_length * 2 znaków
     FRAME_READ_CHECKSUM,
     FRAME_READ_END,        // Oczekujemy znaku FRAME_END
     FRAME_COMPLETE
@@ -28,28 +28,144 @@ typedef enum {
 
 /* Globalne zmienne */
 static FrameState current_state = FRAME_WAIT_START;
-static uint16_t field_index = 0;  // licznik znaków w bieżącym polu
+static uint16_t field_index = 0;  // Licznik znaków w bieżącym polu
 static uint16_t expected_payload_hex_length = 0; // (data_length bajtów * 2 znaków)
-static Frame_raw_structure raw_frame;   // Bufor surowej ramki
-static Frame_structure parsed_frame;    // Przetworzona ramka
+static Frame_raw_structure raw_frame;   // Bufor surowej ramki (w formie hex)
+static Frame_structure parsed_frame;    // Przetworzona ramka (wartości binarne)
 
 extern UART_HandleTypeDef huart2;
 
-/* Funkcja konwersji ciągu hex (o podanej długości) na 32-bitową wartość */
-static uint32_t hexStringToDword(uint8_t *str, uint8_t len) {
-    uint32_t value = 0;
-    for(uint8_t i = 0; i < len; i++){
-        uint8_t nibble = hexDigitToByte(str[i]);
-        if(nibble == 0xFF)
-            return 0; // lub obsłużyć błąd
-        value = (value << 4) | nibble;
+void ProcessCommand(Frame_structure *cmd_frame) {
+    if(cmd_frame == NULL) return;
+
+    uint8_t command = cmd_frame->payload[0];
+    // Parametr może mieć długość 4 bajtów, jeśli występuje; kopiujemy go do zmiennej.
+    uint32_t param = 0;
+    if(cmd_frame->data_length > 1) {
+        // Parametr jest 4 bajtowy, interpretujemy jako liczbę z systemu big-endian
+        param = (cmd_frame->payload[1] << 24) | (cmd_frame->payload[2] << 16) |
+                (cmd_frame->payload[3] << 8)  | (cmd_frame->payload[4]);
     }
-    return value;
+
+    switch(command) {
+        case 0x06: // Komenda GET: pobierz pomiar
+            if(param == 0x00000001) { // GET temperature
+            {
+                float temp = 0;
+                GetLatestData(&temp, NULL, NULL);
+                // Odpowiedź: kod 0x16, parametr to temperatura (przemnożona przez 100)
+                SendResponseFrame(0x16, (uint8_t*)&temp, sizeof(temp)); // Możesz dostosować format
+            }
+            break;
+            }
+        case 0x01: // Ustaw interwał
+            if(cmd_frame->data_length != 5) { // powinien być 1 bajt komendy + 4 bajty parametru
+                SendErrorResponseFrame(0x30); // Błąd formatu
+                return;
+            }
+            if(param < 0x00000001 || param > 0x00002710) { // 1 do 10000 ms
+                SendErrorResponseFrame(0x21); // Błąd interwału
+                return;
+            }
+            if(SetInterval(param) != 0) {
+                SendErrorResponseFrame(0x21);
+                return;
+            }
+            // Odpowiedź: kod 0x11, parametr to ustawiony interwał (np. 2 bajty – tu przekazujemy pełny 32-bit)
+            {
+                uint32_t current_int = GetCurrentInterval();
+                SendResponseFrame(0x11, (uint8_t*)&current_int, 4);
+            }
+            break;
+        case 0x02: // Podaj aktualny interwał – nie może mieć parametru
+            if(cmd_frame->data_length != 1) {
+                SendErrorResponseFrame(0x30);
+                return;
+            }
+            {
+                uint32_t current_int = GetCurrentInterval();
+                SendResponseFrame(0x11, (uint8_t*)&current_int, 4);
+            }
+            break;
+        case 0x03: // Podaj indeks ostatniego odczytu archiwalnego – nie może mieć parametru
+            if(cmd_frame->data_length != 1) {
+                SendErrorResponseFrame(0x30);
+                return;
+            }
+            {
+                uint32_t last_idx = GetLastArchiveIndex(); // Zakładamy 32-bit, ale wysyłamy 3 bajty
+                // W tym przypadku konwertujemy do 3 bajtowej reprezentacji
+                uint8_t idx_bytes[3];
+                idx_bytes[0] = (last_idx >> 16) & 0xFF;
+                idx_bytes[1] = (last_idx >> 8) & 0xFF;
+                idx_bytes[2] = last_idx & 0xFF;
+                SendResponseFrame(0x13, idx_bytes, 3);
+            }
+            break;
+        case 0x04: // Podaj wartość archiwalną dla zadanego indeksu – parametr 4 bajtowy
+            if(cmd_frame->data_length != 5) {
+                SendErrorResponseFrame(0x30);
+                return;
+            }
+            {
+                // Sprawdzamy, czy indeks mieści się w zakresie zapisów archiwalnych
+                uint32_t idx = param;
+                uint32_t last_idx = GetLastArchiveIndex();
+                if(idx > last_idx) {
+                    SendErrorResponseFrame(0x23); // Nie istniejący indeks
+                    return;
+                }
+                float temp = 0, hum = 0, pres = 0;
+                GetHistoricalData(idx, &temp, &hum, &pres);
+                // Odpowiedź zależy od typu pomiaru – tutaj przykładowo wysyłamy archiwalny odczyt temperatury
+                // Można rozbudować: payload[0] – typ pomiaru, payload[1..] – wartość
+                uint8_t payload[5];
+                payload[0] = 0x00; // typ np. 0x00 oznacza temperaturę
+                // Zakładamy, że temperatura jest przechowywana jako int32_t (wartość * 100)
+                int32_t temp_val = (int32_t)roundf(temp * 100);
+                payload[1] = (temp_val >> 16) & 0xFF;
+                payload[2] = (temp_val >> 8) & 0xFF;
+                payload[3] = temp_val & 0xFF;
+                payload[4] = 0x00; // opcjonalnie dodatkowy bajt
+                SendResponseFrame(0x04, payload, 5);
+            }
+            break;
+        case 0x05: // Kasuje archiwalne zapisy – nie może mieć parametru
+            if(cmd_frame->data_length != 1) {
+                SendErrorResponseFrame(0x30);
+                return;
+            }
+            DeleteHistoricalData();
+            // Odpowiedź: np. wysyłamy potwierdzenie z kodem 0x05 i zerowym parametrem
+            SendResponseFrame(0x05, NULL, 0);
+            break;
+        default:
+            SendErrorResponseFrame(0x30); // Nie rozpoznany parametr
+            break;
+    }
 }
 
-/* Funkcja przetwarzająca odebrane pole.
- * W zależności od bieżącego stanu konwertujemy dane z formatu hex do wartości binarnych.
- */
+/*
+   Łączy pola: sender, receiver, data_length oraz payload (o długości data_length bajtów)
+   i oblicza CRC16 IBM, używając calculateCRC() z crc16ibm.c.
+*/
+static uint16_t calculateParsedChecksum(Frame_structure *frame) {
+    uint8_t buf[256];
+    uint16_t idx = 0;
+    buf[idx++] = frame->sender;
+    buf[idx++] = frame->receiver;
+    buf[idx++] = frame->data_length;
+    for(uint8_t i = 0; i < frame->data_length; i++){
+         buf[idx++] = frame->payload[i];
+    }
+    return calculateCRC(buf, idx);
+}
+
+static uint8_t isParsedChecksumValid(Frame_structure *frame) {
+    return (calculateParsedChecksum(frame) == frame->checksum);
+}
+
+/* Funkcja przetwarzająca odebrane pole – konwersja danych z formatu hex do wartości binarnych */
 static void processReceivedField(FrameState state, uint8_t *buffer, uint16_t len) {
     switch(state) {
         case FRAME_READ_SENDER:
@@ -64,22 +180,17 @@ static void processReceivedField(FrameState state, uint8_t *buffer, uint16_t len
             memcpy(raw_frame.data_length, buffer, LEN_DATALENGTH);
             uint8_t dl = hexStringToByte(buffer);
             parsed_frame.data_length = dl;
-            expected_payload_hex_length = dl * 2;  // Każdy bajt to 2 znaki
+            expected_payload_hex_length = dl * 2;  // Każdy bajt = 2 znaki
             break;
         }
-        case FRAME_READ_PAYLOAD:
+        case FRAME_READ_PAYLOAD: {
             memcpy(raw_frame.payload, buffer, expected_payload_hex_length);
-            /* Kopiujemy payload do parsed_frame.payload.
-             * Interpretacja payloadu: zawsze pierwszy bajt to kod komendy.
-             * Jeśli parsed_frame.data_length > 10, oznacza to, że oprócz 1 bajtu kodu i 8 bajtów argumentu,
-             * pojawia się dodatkowo pole archiwum (np. 3 bajty, lub więcej).
-             * W tej implementacji przekazujemy całość, a dalsza interpretacja pozostaje w gestii aplikacji.
-             */
+            // Konwertujemy payload: dla każdej pary znaków wywołujemy hexStringToByte
             for(uint16_t i = 0; i < (expected_payload_hex_length / 2); i++){
-                // Przetwarzamy pary znaków, by uzyskać pojedynczy bajt payloadu
                 parsed_frame.payload[i] = hexStringToByte(&buffer[i*2]);
             }
             break;
+        }
         case FRAME_READ_CHECKSUM:
             memcpy(raw_frame.checksum, buffer, LEN_CHECKSUM);
             parsed_frame.checksum = hexStringToWord(buffer);
@@ -89,31 +200,14 @@ static void processReceivedField(FrameState state, uint8_t *buffer, uint16_t len
     }
 }
 
-/* Funkcja obliczająca sumę kontrolną na podstawie pól ramki (od sender do końca payloadu).
- * Tutaj stosujemy prosty algorytm – sumujemy wartości bajtów.
- */
-static uint16_t calculateParsedChecksum(Frame_structure *frame) {
-    uint16_t sum = 0;
-    sum += frame->sender;
-    sum += frame->receiver;
-    sum += frame->data_length;
-    for(uint8_t i = 0; i < frame->data_length; i++){
-        sum += frame->payload[i];
-    }
-    return sum;
-}
-
-static uint8_t isParsedChecksumValid(Frame_structure *frame) {
-    return (calculateParsedChecksum(frame) == frame->checksum);
-}
-
 /* Funkcja odbioru ramki – przetwarzanie bajt po bajcie */
 void ReceiveFrame(void) {
     uint8_t RX_byte;
-    while(UART_RXisNotEmpty()) {  // Zakładamy, że funkcja UART_RXisNotEmpty() sprawdza, czy są dane
+    while(UART_RXisNotEmpty()) {  // Zakładamy, że funkcje UART_RXisNotEmpty() i USART_getchar() są dostępne
+        __disable_irq();
         RX_byte = USART_getchar();
+        __enable_irq();
 
-        /* Jeśli otrzymamy znak startu, resetujemy stan */
         if(RX_byte == FRAME_START) {
             current_state = FRAME_READ_SENDER;
             field_index = 0;
@@ -125,7 +219,6 @@ void ReceiveFrame(void) {
         if(current_state == FRAME_WAIT_START)
             continue;
 
-        /* Jeśli pojawi się znak FRAME_END przedwcześnie, resetujemy odbiór */
         if(RX_byte == FRAME_END && current_state != FRAME_READ_END) {
             current_state = FRAME_WAIT_START;
             continue;
@@ -163,7 +256,7 @@ void ReceiveFrame(void) {
                 break;
             }
             case FRAME_READ_PAYLOAD: {
-                static uint8_t temp_buf[28]; // maksymalna liczba znaków payload
+                static uint8_t temp_buf[256]; // maksymalnie MAX_PAYLOAD_HEX znaków
                 temp_buf[field_index++] = RX_byte;
                 if(field_index >= expected_payload_hex_length) {
                     processReceivedField(FRAME_READ_PAYLOAD, temp_buf, expected_payload_hex_length);
@@ -183,7 +276,6 @@ void ReceiveFrame(void) {
                 break;
             }
             case FRAME_READ_END: {
-                /* Oczekujemy, aż otrzymamy znak FRAME_END */
                 if(RX_byte == FRAME_END) {
                     current_state = FRAME_COMPLETE;
                 } else {
@@ -197,29 +289,64 @@ void ReceiveFrame(void) {
 
         if(current_state == FRAME_COMPLETE) {
             if(isParsedChecksumValid(&parsed_frame)) {
-                /* Tutaj interpretujemy odebrany payload.
-                   Jeśli parsed_frame.data_length <= 10 – payload zawiera tylko komendę i argument.
-                   Jeśli > 10 – payload zawiera dodatkowo pole archiwum (od bajtu 10 wzwyż).
-                */
-                char response[64];
-                sprintf(response, "Cmd: %02X DL: %02X Payload:", parsed_frame.payload[0], parsed_frame.data_length);
-                HAL_UART_Transmit_IT(&huart2, (uint8_t *)response, strlen(response));
-                memset(response, 0, sizeof(response));
-                for(uint8_t i = 0; i < parsed_frame.data_length; i++){
-                    sprintf(response, " %02X", parsed_frame.payload[i]);
-                    HAL_UART_Transmit_IT(&huart2, (uint8_t *)response, strlen(response));
-                    memset(response, 0, sizeof(response));
-                }
-                sprintf(response, " CRC: %04X\r\n", parsed_frame.checksum);
-                HAL_UART_Transmit_IT(&huart2, (uint8_t *)response, strlen(response));
-            } else {
-                HAL_UART_Transmit_IT(&huart2, (uint8_t *)"Checksum error\r\n", 17);
+                ProcessCommand(&parsed_frame);
             }
             current_state = FRAME_WAIT_START;
         }
     }
 }
 
+/* --- Funkcje tworzące ramkę zwrotną --- */
+
+/* Funkcja tworząca ramkę odpowiedzi.
+   Parametry:
+      resp_code – kod odpowiedzi (np. 0x11, 0x16, 0x17, 0x18, 0x13, 0x04, 0x05),
+      param – wskaźnik do danych odpowiedzi (binarnie),
+      param_len – długość parametru (w bajtach).
+   Ramka zwrotna: sender, receiver, data_length, payload, checksum.
+   Przyjmujemy: sender = 'B', receiver = 'P'.
+*/
+void SendResponseFrame(uint8_t resp_code, uint8_t *param, uint8_t param_len) {
+    Frame_structure resp;
+    resp.sender = 'B';
+    resp.receiver = 'P';
+    resp.payload[0] = resp_code;
+    if(param != NULL && param_len > 0) {
+        memcpy(&resp.payload[1], param, param_len);
+        resp.data_length = 1 + param_len;
+    } else {
+        resp.data_length = 1;
+    }
+    resp.checksum = calculateParsedChecksum(&resp);
+
+    // Konwersja pól ramki do postaci hex (C-string)
+    char raw_sender[3], raw_receiver[3], raw_datalen[3];
+    char raw_payload[MAX_PAYLOAD_HEX+1], raw_checksum[5];
+    byte_to_hex_chars(resp.sender, raw_sender); raw_sender[2] = '\0';
+    byte_to_hex_chars(resp.receiver, raw_receiver); raw_receiver[2] = '\0';
+    byte_to_hex_chars(resp.data_length, raw_datalen); raw_datalen[2] = '\0';
+    uint16_t payload_hex_len = resp.data_length * 2;
+    for(uint8_t i = 0; i < resp.data_length; i++){
+        byte_to_hex_chars(resp.payload[i], &raw_payload[i*2]);
+    }
+    raw_payload[payload_hex_len] = '\0';
+    byte_to_hex_chars((resp.checksum >> 8) & 0xFF, raw_checksum);
+    byte_to_hex_chars(resp.checksum & 0xFF, &raw_checksum[2]);
+    raw_checksum[4] = '\0';
+
+    char final_frame[64]; // Maksymalna ramka jest krótka (około 2+2+2+(max_payload)+4+2 znaków)
+    sprintf(final_frame, "^%s%s%s%s%s#", raw_sender, raw_receiver, raw_datalen, raw_payload, raw_checksum);
+    USART_fsend("%s", final_frame);
+}
+
+/* Funkcja wysyłająca ramkę błędu.
+   error_code – kod błędu (np. 0x21, 0x30, 0x23).
+   Parametr błędu to 4 bajty z wartością 0xFF.
+*/
+void SendErrorResponseFrame(uint8_t error_code) {
+    uint8_t error_param[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    SendResponseFrame(error_code, error_param, 4);
+}
 
 
 /*

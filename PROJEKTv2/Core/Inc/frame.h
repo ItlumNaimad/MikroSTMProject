@@ -3,43 +3,51 @@
 
 #include "main.h"
 
+#define MAX_PAYLOAD_BYTES 14
+#define MAX_PAYLOAD_HEX   (MAX_PAYLOAD_BYTES * 2)
+
 /*
- * Struktura ramki przetworzonej – wartości binarne.
+ * Ramka przetworzona – wartości binarne.
  * Kolejność pól:
  *   sender (1 bajt)
  *   receiver (1 bajt)
- *   data_length (1 bajt) – długość payloadu (w bajtach)
- *   payload (zmienna długość, max 14 bajtów)
+ *   data_length (1 bajt) – długość pola payload (w bajtach)
+ *   payload (zmienna, max MAX_PAYLOAD_BYTES bajtów)
  *   checksum (2 bajty)
- *   FRAME_END (1 bajt) – nie jest przechowywany w strukturze, ale ramka jest poprawna tylko, gdy pojawi się znak końca.
  */
 typedef struct {
     uint8_t sender;
     uint8_t receiver;
-    uint8_t data_length;  // długość payloadu w bajtach
-    uint8_t payload[14];  // maksymalnie 14 bajtów (może zawierać: kod, argument, opcjonalnie pole archiwalne)
+    uint8_t data_length; // liczba bajtów payloadu
+    uint8_t payload[MAX_PAYLOAD_BYTES];
     uint16_t checksum;
 } Frame_structure;
 
 /*
- * Struktura ramki surowej – odebrane dane jako ciągi hex.
+ * Ramka surowa – odebrane dane jako ciągi znaków hex.
  * Kolejność pól (ilości znaków):
- *   sender:         2 znaki
- *   receiver:       2 znaki
- *   data_length:    2 znaki
- *   payload:        zmienna, max 28 znaków (czyli do 14 bajtów)
- *   checksum:       4 znaki
- *   FRAME_END:      1 znak (na końcu, nie wliczany w tę strukturę)
+ *   sender:         2 znaki + '\0'
+ *   receiver:       2 znaki + '\0'
+ *   data_length:    2 znaki + '\0'
+ *   payload:        zmienna, max (MAX_PAYLOAD_BYTES*2) znaków + '\0'
+ *   checksum:       4 znaki + '\0'
  */
 typedef struct {
-    uint8_t sender[2];
-    uint8_t receiver[2];
-    uint8_t data_length[2];
-    uint8_t payload[28];  // max 14 bajtów * 2 znaki
-    uint8_t checksum[4];
+    uint8_t sender[3];
+    uint8_t receiver[3];
+    uint8_t data_length[3];
+    uint8_t payload[MAX_PAYLOAD_HEX + 1];
+    uint8_t checksum[5];
 } Frame_raw_structure;
 
-void ReceiveFrame(void);
+/* Funkcje przetwarzania komend i wysyłania odpowiedzi */
+void ProcessCommand(Frame_structure *cmd_frame);
+void SendResponseFrame(uint8_t resp_code, uint8_t *param, uint8_t param_len);
+void SendErrorResponseFrame(uint8_t error_code);
+
+void ReceiveFrame();
+
+#endif /* INC_FRAME_H_ */
 
 /* Pozostałości po pracy z biblioteką oryginalną od producenta czujnika
 
@@ -53,4 +61,4 @@ void ReceiveFrame(void);
 	// Funkcja inicjalizujaca wartosci do struktury czujnika
 	void init_bme280_conf();
 */
-#endif /* INC_FRAME_H_ */
+
